@@ -1,0 +1,91 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk-17'
+        nodejs 'Node16'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('clean workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/manzarvicky/bingo-app.git'
+            }
+        }
+        stage("Sonarqube Analysis ") {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Bingo \
+                    -Dsonar.projectKey=Bingo '''
+                }
+            }
+        }
+        stage("quality gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                }
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh "docker build -t bingo ."
+                        sh "docker tag bingo manzarvicky/bingo-app:latest"
+                        sh "docker push manzarvicky/bingo-app:latest"
+                    }
+                }
+            }
+        }
+        stage("TRIVY") {
+            steps {
+                sh "trivy image manzarvicky/bingo-app:latest > trivyimage.txt"
+            }
+        }
+        stage('Deploy to container') {
+            steps {
+                sh 'docker run -d --name bingo -p 3000:3000 manzarvicky/bingo-app:latest'
+            }
+        }
+    }
+
+post {
+        always {
+            emailext (
+                subject: "Jenkins Job: ${env.JOB_NAME} [${env.BUILD_NUMBER}] - ${currentBuild.currentResult}",
+                body: """<p>Project: ${env.JOB_NAME}</p>
+                         <p>Build Number: ${env.BUILD_NUMBER}</p>
+                         <p>Build Status: ${currentBuild.currentResult}</p>
+                         <p>Build URL: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>""",
+                to: 'gaathamkt@gmail.com',
+                from: 'gaathamkt@gmail.com',
+                replyTo: 'gaathamkt@gmail.com',
+                mimetype: 'text/html',
+                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+            )
+        }
+    }
+}
